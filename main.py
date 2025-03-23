@@ -29,17 +29,17 @@ import kitti_dataset
 import nclt_dataset 
 from model import PARE_Net
 
-#os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 def get_args():
     parser = argparse.ArgumentParser(description='BEVPlace++')
-    parser.add_argument('--mode', type=str, default='train', help='Mode', choices=['train', 'test'])
+    parser.add_argument('--mode', type=str, default='test', help='Mode', choices=['train', 'test'])
     
     parser.add_argument('--batchSize', type=int, default=1, 
             help='Number of triplets (query, pos, negs). Each triplet consists of 12 images.')
-    parser.add_argument('--num_neg', type=int, default=3, 
+    parser.add_argument('--num_neg', type=int, default=2, 
             help='Number of triplets (query, pos, negs). Each triplet consists of 12 images.')
-    parser.add_argument('--cacheBatchSize', type=int, default=128, help='Batch size for caching and testing')
+    parser.add_argument('--cacheBatchSize', type=int, default=4, help='Batch size for caching and testing')
     parser.add_argument('--nEpochs', type=int, default=40, help='number of epochs to train for')
     parser.add_argument('--nGPU', type=int, default=2, help='number of GPU to use.')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning Rate.')
@@ -56,8 +56,8 @@ def get_args():
     parser.add_argument('--cachePath', type=str, default='./cache/', help='Path to save cache to.')
 
 
-    parser.add_argument('--load_from', type=str, default=None, help='Path to load checkpoint from, for resuming training or testing.')
-    parser.add_argument('--ckpt', type=str, default='best', 
+    parser.add_argument('--load_from', type=str, default='/home/ssd8t/wzb/BEVPlace2/kitti.pth.tar', help='Path to load checkpoint from, for resuming training or testing.')
+    parser.add_argument('--ckpt', type=str, default='None', 
             help='Load_from from latest or best checkpoint.', choices=['latest', 'best'])
     
 
@@ -178,7 +178,10 @@ def train_epoch(epoch, model, train_set, opt):
 
 def infer(eval_set, return_local_feats = False):
     test_data_loader = DataLoader(dataset=eval_set, 
-                num_workers=opt.threads, batch_size=opt.cacheBatchSize, shuffle=False)
+                num_workers=opt.threads, 
+                batch_size=opt.cacheBatchSize, 
+                collate_fn=kitti_dataset.infer_collate_fn,
+                shuffle=False)
 
     model.eval()
     model.to('cuda')
@@ -186,10 +189,25 @@ def infer(eval_set, return_local_feats = False):
         
         all_global_descs = []
         all_local_feats = []
-        for _, (imgs, _) in enumerate(tqdm(test_data_loader)):
-            imgs = imgs.to(device)
-            _ , local_feat, global_desc = model(imgs)
-            all_global_descs.append(global_desc.detach().cpu().numpy())
+        for iteration, (data_dict, indices) in enumerate(tqdm(test_data_loader)):
+
+            data_dict = to_cuda(data_dict)
+            data = precompute_neibors(data_dict['points'], data_dict['lengths'],
+                                                4,
+                                                [35] * 4,
+                                                )
+            data_dict.update(data)
+            # B, C, H, W = query.shape
+            # input = torch.cat([query, positives, negatives])
+
+            # input = input.to(device)
+            
+            global_descs = model(data_dict)
+            local_feat = None
+        # for _, (imgs, _) in enumerate(tqdm(test_data_loader)):
+            # imgs = imgs.to(device)
+            # _ , local_feat, global_desc = model(imgs)
+            all_global_descs.append(global_descs.detach().cpu().numpy())
             if return_local_feats:
                 all_local_feats.append(local_feat.detach().cpu().numpy())
            
@@ -197,6 +215,7 @@ def infer(eval_set, return_local_feats = False):
         return np.concatenate(all_local_feats, axis=0), np.concatenate(all_global_descs, axis=0)
     else:
         return np.concatenate(all_global_descs, axis=0)
+
 def testPCA(eval_set, epoch=0, write_tboard=False):
     # TODO global descriptor PCA for faster inference speed
     pass
@@ -277,23 +296,35 @@ if __name__ == "__main__":
     )
     model = model.cuda()
     
-    # # initialize netvlad with pre-trained or cluster
-    # if opt.load_from:
-    #     if opt.ckpt.lower() == 'latest':
-    #         resume_ckpt = join(opt.load_from,  'checkpoint.pth.tar')
-    #     elif opt.ckpt.lower() == 'best':
-    #         resume_ckpt = join(opt.load_from, 'model_best.pth.tar')
+    # initialize netvlad with pre-trained or cluster
+    if opt.load_from:
+        if opt.ckpt.lower() == 'latest':
+            resume_ckpt = join(opt.load_from,  'checkpoint.pth.tar')
+        elif opt.ckpt.lower() == 'best':
+            resume_ckpt = join(opt.load_from, 'model_best.pth.tar')
+        else:
+            resume_ckpt = opt.load_from
 
-    #     if isfile(resume_ckpt):
-    #         print("=> loading checkpoint '{}'".format(resume_ckpt))
-    #         checkpoint = torch.load(resume_ckpt, map_location=lambda storage, loc: storage)
-    #         model.load_state_dict(checkpoint['state_dict'])
-    #         model = model.to(device)
+        if isfile(resume_ckpt):
+            print("=> loading checkpoint '{}'".format(resume_ckpt))
+            ckpt = torch.load(resume_ckpt, map_location=lambda storage, loc: storage)
+            # model.load_state_dict(checkpoint['model'])
+            keys_state_dict = set(ckpt['model'].keys())
+            keys_model = set(model.state_dict().keys())
+            unexpected_keys = keys_state_dict - keys_model
+            missing_keys = keys_model - keys_state_dict
+            if len(missing_keys) > 0:
+                print(f"Missing keys: {missing_keys}")
+                exit(-1)
+            else:
+                print(f"unsurpported keys: {unexpected_keys}")
+                model.load_state_dict(ckpt['model'], strict=False)
 
-    #         print("=> loaded checkpoint '{}' (epoch {})"
-    #             .format(resume_ckpt, checkpoint['epoch']))
-    #     else:
-    #         print("=> no checkpoint found at '{}'".format(resume_ckpt))
+            model = model.to(device)
+            # print("=> loaded checkpoint '{}' (epoch {})"
+            #     .format(resume_ckpt, checkpoint['epoch']))
+        else:
+            print("=> no checkpoint found at '{}'".format(resume_ckpt))
     # else:
     #     initcache = join(opt.cachePath, 'desc_cen.hdf5')
     #     if not isfile(initcache):
@@ -389,16 +420,17 @@ if __name__ == "__main__":
         
         recalls_kitti = []
         print('====> Extracting Features of KITTI and calculating recalls')
-        eval_seq =  ['08']#, '02', '05', '06', '08']
+        eval_seq =  ['08']
 
         for seq in eval_seq:   
             if seq=='08':
-                test_set = kitti_dataset.InferDataset(seq=seq,sample_inteval=5)  #return a very large local feature mat could be very slow. sample the dataset to reduce ram and time cost
-                local_feats, global_descs = infer(test_set, return_local_feats=True)  
-                recall_top1, success_rate, mean_trans_err, mean_rot_err = kitti_dataset.evaluateResults(seq, global_descs, local_feats, test_set, "out_imgs/")
+                test_set = kitti_dataset.InferDataset(seq=seq, sample_inteval=5)  #return a very large local feature mat could be very slow. sample the dataset to reduce ram and time cost
+                global_descs = infer(test_set, return_local_feats=False)  
+                recall_top1 = kitti_dataset.evaluateResults(seq, global_descs, None, test_set, None)
             else:
-                test_set = kitti_dataset.InferDataset(seq=seq)  
-                recall_top1 = kitti_dataset.evaluateResults(seq, global_descs, local_feats, test_set)
+                test_set = kitti_dataset.InferDataset(seq=seq, sample_inteval=5)  
+                global_descs = infer(test_set, return_local_feats=False)  
+                recall_top1 = kitti_dataset.evaluateResults(seq, global_descs, None, test_set, None)
             recalls_kitti.append(recall_top1)
 
         mean_recall = np.mean(recalls_kitti)
@@ -407,33 +439,33 @@ if __name__ == "__main__":
             print('%s: %0.2f'%(eval_seq[ii], recalls_kitti[ii]*100))
 
         print('mean: %0.2f'%(mean_recall*100))
-        print('################# Global Loc Results on KITTI 08  ##################\n')
+        # print('################# Global Loc Results on KITTI 08  ##################\n')
 
-        print('Success rate: %0.2f; Mean Trans. Err.: %0.2f; Mean Rot. Err.: %0.2f'%(success_rate*100, mean_trans_err, mean_rot_err))
+        # print('Success rate: %0.2f; Mean Trans. Err.: %0.2f; Mean Rot. Err.: %0.2f'%(success_rate*100, mean_trans_err, mean_rot_err))
 
         
         print('\n')
 
 
-        print('====> Extracting Features of NCLT and calculating recalls')
-        eval_seq =  ['2012-01-15', '2012-02-04', '2012-03-17', '2012-06-15', '2012-09-28', '2012-11-16', '2013-02-23']
-        eval_datasets = []
-        eval_global_descs = []
-        for seq in eval_seq:   
+        # print('====> Extracting Features of NCLT and calculating recalls')
+        # eval_seq =  ['2012-01-15', '2012-02-04', '2012-03-17', '2012-06-15', '2012-09-28', '2012-11-16', '2013-02-23']
+        # eval_datasets = []
+        # eval_global_descs = []
+        # for seq in eval_seq:   
 
-            test_set = nclt_dataset.InferDataset(seq=seq)   
-            global_descs = infer(test_set)
-            eval_global_descs.append(global_descs)
-            eval_datasets.append(test_set)
+        #     test_set = nclt_dataset.InferDataset(seq=seq)   
+        #     global_descs = infer(test_set)
+        #     eval_global_descs.append(global_descs)
+        #     eval_datasets.append(test_set)
         
-        recalls_nclt = nclt_dataset.evaluateResults(eval_global_descs, eval_datasets)# (q_descs, db_descs, q_dataset, db_dataset)
+        # recalls_nclt = nclt_dataset.evaluateResults(eval_global_descs, eval_datasets)# (q_descs, db_descs, q_dataset, db_dataset)
 
-        print('\n################# Recall @ top 1 on NCLT ########################\n')
-        mean_recall = np.mean(recalls_nclt)
+        # print('\n################# Recall @ top 1 on NCLT ########################\n')
+        # mean_recall = np.mean(recalls_nclt)
 
 
-        for ii in range(len(eval_seq[1:])):
-            print('%s: %0.2f'%(eval_seq[ii+1], recalls_nclt[ii]*100))
+        # for ii in range(len(eval_seq[1:])):
+        #     print('%s: %0.2f'%(eval_seq[ii+1], recalls_nclt[ii]*100))
         
-        print('mean: %0.2f'%(mean_recall*100))
+        # print('mean: %0.2f'%(mean_recall*100))
 

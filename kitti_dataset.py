@@ -39,19 +39,49 @@ class InferDataset(data.Dataset):
 
     def __getitem__(self, index):
         
-        img = cv2.imread(self.imgs_path[index], 0)
-        if 0:  #test rotation
-            mat = cv2.getRotationMatrix2D((img.shape[1]//2, img.shape[0]//2 ), np.random.randint(0,360), 1)
-            img = cv2.warpAffine(img, mat, img.shape[:2])
+        # pc_query = self.get_pointcloud(self.imgs_path[index])
+        # img = cv2.imread(self.imgs_path[index], 0)
+        # if 0:  #test rotation
+        #     mat = cv2.getRotationMatrix2D((img.shape[1]//2, img.shape[0]//2 ), np.random.randint(0,360), 1)
+        #     img = cv2.warpAffine(img, mat, img.shape[:2])
 
-        img = (img.astype(np.float32))/256 
-        img = img[np.newaxis, :, :].repeat(3,0)
+        # img = (img.astype(np.float32))/256 
+        # img = img[np.newaxis, :, :].repeat(3,0)
         
-        return  img, index
+        return  self.imgs_path[index], index
 
     def __len__(self):
         return len(self.imgs_path)
 
+def get_pointcloud(imgpath):
+        seq, pc_name = imgpath.split('/')[-3], imgpath.split('/')[-1][:-4]
+        pcpath = f'./pointcloud/KITTI/downsampled/{seq}/{pc_name}.npy'
+        pc = np.load(pcpath).astype(np.float32)
+        return pc
+
+def infer_collate_fn(batch):
+
+    batch = list(filter (lambda x:x is not None, batch))
+    if len(batch) == 0: return None, None, None, None, None, None
+
+    imgs_pathes_tuple, indices = zip(*batch)
+
+    point_cloud_list = [
+        torch.from_numpy(get_pointcloud(imgs_pathes_tuple[i])).float()
+          for i in range(len(imgs_pathes_tuple))
+    ]
+    
+    data_dict = multi_single_pc_collate_fn_stack_mode(
+        point_cloud_list,
+        num_stages=4,
+        voxel_size=0.3,
+        num_neighbors=[35]*4,
+        subsample_ratio=2.5,
+    )
+
+    indices = list(indices)
+
+    return data_dict, indices
 
 def evaluateResults(seq, global_descs, local_feats, dataset, match_results_save_path=None):
 
